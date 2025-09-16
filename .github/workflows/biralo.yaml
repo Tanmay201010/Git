@@ -1,0 +1,165 @@
+name: Continuous Persistent VPS
+ 
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
+ 
+jobs:
+  vps-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # Just under 6 hours
+ 
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Allora 
+        run: |
+           sudo apt update && sudo apt upgrade -y
+           sudo apt install -y ca-certificates zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev curl git wget make jq build-essential pkg-config lsb-release libssl-dev libreadline-dev libffi-dev gcc screen unzip lz4
+           sudo apt install -y python3 python3-pip
+
+           python3 --version
+
+           curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+           sudo apt-get update
+           sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+
+           docker version
+           sudo curl -L "https://github.com/docker/compose/releases/download/2.28.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+           sudo chmod +x /usr/local/bin/docker-compose
+           docker compose version
+
+           sudo groupadd docker || true
+           sudo usermod -aG docker $USER
+           sudo rm -rf /usr/local/go
+
+           curl -L https://go.dev/dl/go1.22.4.linux-amd64.tar.gz | sudo tar -xzf - -C /usr/local
+           echo "PATH=/usr/local/go/bin:$HOME/go/bin:$PATH" >> $GITHUB_ENV
+
+           go version
+           git clone https://github.com/allora-network/basic-coin-prediction-node
+           cd basic-coin-prediction-node
+           curl -o config.json https://raw.githubusercontent.com/Tanmay201010/Create-VPs-3-/refs/heads/main/config.json
+      - name: Create env_file
+        run: |
+          mkdir -p basic-coin-prediction-node/worker-data
+          echo "TOKEN=uallo" > basic-coin-prediction-node/worker-data/env_file
+          echo "REGION=us-east" >> basic-coin-prediction-node/worker-data/env_file
+      - name: Create .env file
+        run: |
+          echo "TOKEN=${{ secrets.TOKEN }}" > basic-coin-prediction-node/.env
+
+    version: "3.9"
+
+services:
+  inference:
+    build: .
+    container_name: inference
+    environment:
+      - REGION=us-east-1
+      - TOKEN=your_token_here
+      - MODEL=your_model_here
+      - CG_API_KEY=your_api_key_here
+    depends_on:
+      - updater
+      - worker
+
+  updater:
+    build: ./updater
+    container_name: updater
+
+  worker:
+    build: ./worker
+    container_name: worker
+
+      - name: Run docker compose
+        run: docker compose up --build
+        working-directory: basic-coin-prediction-node
+        
+
+
+ 
+      - name: Set hostname to biralo
+        run: sudo hostnamectl set-hostname biralo
+ 
+      - name: Download VPS backup (if any)
+        uses: actions/download-artifact@v4
+        with:
+          name: vps-backup
+          path: ./backup
+        continue-on-error: true
+ 
+      - name: Install prerequisites
+        run: |
+          sudo apt update
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch
+ 
+      - name: Install Tailscale official script
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+ 
+      - name: Restore backup files
+        run: |
+          if [ -f ./backup/backup.zip ]; then
+            unzip -o ./backup/backup.zip -d /
+          else
+            echo "No backup found, starting fresh"
+          fi
+ 
+      - name: Restore Tailscale state
+        run: |
+          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+          fi
+ 
+      - name: Start Tailscale
+        run: |
+          sudo tailscaled &
+          sleep 8
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
+ 
+      - name: Create user biralo with sudo
+        run: |
+          if ! id -u biralo >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash biralo
+            echo "biralo:biralo" | sudo chpasswd
+            sudo usermod -aG sudo biralo
+            echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
+          fi
+ 
+      - name: Start tmate session for SSH access
+        uses: mxschmitt/action-tmate@v3
+ 
+      - name: Show Tailscale IP and tmate info
+        run: |
+          echo "🔗 Tailscale IP:"
+          tailscale ip -4 || echo "Tailscale IP not found"
+          echo ""
+          echo "🔑 tmate SSH session:"
+          cat $HOME/.tmate.sock/ssh
+ 
+      - name: Sleep to keep VPS alive
+        run: sleep 21600  # 6 hours
+ 
+      - name: Backup VPS data and tailscale state
+        run: |
+          sudo mkdir -p /opt/vps-backup/data
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+          sudo chown -R $USER:$USER /opt/vps-backup
+          zip -r backup.zip /opt/vps-backup
+     
+           
+
+    
+ 
+      - name: Upload VPS backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup
+          path: backup.zip
